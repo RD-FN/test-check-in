@@ -1,8 +1,11 @@
 /**
  * ระบบเช็คชื่อ คลาส Claude AI : ตัวเชื่อมกับ Google Sheets
  *
+ * ผูกกับ Google Sheet "รายชื่อ" ของคลาสแล้วผ่าน SPREADSHEET_ID ด้านล่าง
+ * ทุกการเช็คชื่อจะเพิ่มแถวในชีตแรก (timestamp, name, note) และเก็บรายละเอียดในชีต Checkins
+ *
  * วิธีติดตั้ง
- * 1. สร้าง Google Sheet ใหม่ แล้วไปที่ ส่วนขยาย > Apps Script
+ * 1. เปิด Google Sheet "รายชื่อ" แล้วไปที่ ส่วนขยาย > Apps Script
  * 2. ลบโค้ดเดิมทั้งหมด วางโค้ดไฟล์นี้แทน
  * 2.1 ตั้ง PIN ผู้สอน: ไอคอนเฟือง (การตั้งค่าโปรเจ็กต์) > พร็อพเพอร์ตี้ของสคริปต์
  *     > เพิ่ม ชื่อ ADMIN_PIN ค่า = PIN ของคุณ
@@ -11,13 +14,20 @@
  *    - เรียกใช้ในฐานะ: ฉัน (Me)
  *    - ผู้ที่มีสิทธิ์เข้าถึง: ทุกคน (Anyone)
  * 4. อนุญาตสิทธิ์ แล้วคัดลอก URL ที่ลงท้ายด้วย /exec
- * 5. นำ URL ไปใส่ใน SHEETS_URL ในไฟล์ index.html
+ * 5. นำ URL ไปใส่ใน SHEETS_URL ในไฟล์ config.js
  *
  * ชีต Students, Checkins และ Settings จะถูกสร้างให้อัตโนมัติเมื่อมีการใช้งานครั้งแรก
  * ถ้าแก้โค้ดนี้ภายหลัง ต้อง Deploy > จัดการการทำให้ใช้งานได้ > แก้ไข > เวอร์ชันใหม่ ทุกครั้ง
  */
 
 const MAX_SIG = 49000;      // เซลล์ Google Sheets เก็บได้ไม่เกิน 50,000 ตัวอักษร
+
+// Google Sheet ที่ใช้เก็บข้อมูล (รหัสจากลิงก์ docs.google.com/spreadsheets/d/<รหัส>/edit)
+// เว้นว่างไว้ ถ้าจะใช้ชีตที่เปิด Apps Script ขึ้นมา
+const SPREADSHEET_ID = "13u-gWPZjH2hOnps6gyh7jvYI_vLSr-FqjlK31TPHYow";
+const LOG_SHEET_GID = 0;    // ชีตแรก (gid=0) ที่บันทึก timestamp, name, note
+const LOG_HEADERS = ["timestamp", "name", "note"];
+const TZ = "Asia/Bangkok";
 
 const SHEETS = {
   Students: ["id", "code", "name", "order"],
@@ -70,8 +80,24 @@ function withLock(fn) {
 }
 
 /* ---------- ชีต ---------- */
+function book() {
+  return SPREADSHEET_ID ? SpreadsheetApp.openById(SPREADSHEET_ID) : SpreadsheetApp.getActiveSpreadsheet();
+}
+
+// ชีตแรกของไฟล์ ใช้บันทึกการเช็คชื่อแบบอ่านง่าย: timestamp, name, note
+function logSheet() {
+  const sh = book().getSheets().filter(function (x) { return x.getSheetId() === LOG_SHEET_GID; })[0];
+  if (!sh) return null;
+  if (sh.getLastRow() === 0) sh.getRange(1, 1, 1, LOG_HEADERS.length).setValues([LOG_HEADERS]).setFontWeight("bold");
+  return sh;
+}
+
+function logStamp(iso) {
+  return Utilities.formatDate(new Date(iso), TZ, "dd/MM/yyyy HH:mm");
+}
+
 function sheet(name) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = book();
   let sh = ss.getSheetByName(name);
   if (!sh) {
     sh = ss.insertSheet(name);
@@ -136,6 +162,14 @@ function checkin(req) {
 
   d.sh.appendRow([date, String(r.studentId), String(r.code || ""), String(r.name || ""), String(r.time || ""),
     String(r.timeText || ""), String(r.status || ""), String(r.lateMinutes || 0), String(r.sig || "")]);
+
+  const ls = logSheet();
+  if (ls) {
+    const row = ls.getLastRow() + 1;
+    const range = ls.getRange(row, 1, 1, LOG_HEADERS.length);
+    range.setNumberFormat("@");   // เก็บเป็นข้อความ จะได้ตรงกับรูปแบบเดิมและลบตามได้ตอนยกเลิก
+    range.setValues([[logStamp(r.time || new Date().toISOString()), String(r.name || ""), r.status === "สาย" ? "สาย" : "มา"]]);
+  }
   return {};
 }
 
@@ -144,12 +178,30 @@ function undo(req) {
   const d = data("Checkins");
   for (let i = d.vals.length - 1; i >= 0; i--) {
     if (asDate(d.vals[i][0]) === date && String(d.vals[i][1]) === String(req.studentId)) {
+      removeLog(String(d.vals[i][4]), String(d.vals[i][3]));
       const row = i + 2;
       if (d.sh.getMaxRows() > 2) d.sh.deleteRow(row);
       else d.sh.getRange(row, 1, 1, SHEETS.Checkins.length).clearContent();
     }
   }
   return {};
+}
+
+// ลบแถวที่ตรงกันในชีตแรก เมื่อผู้สอนยกเลิกการเช็คชื่อ
+function removeLog(iso, name) {
+  const ls = logSheet();
+  if (!ls || !iso) return;
+  const last = ls.getLastRow();
+  if (last < 2) return;
+  const stamp = logStamp(iso);
+  const vals = ls.getRange(2, 1, last - 1, 2).getDisplayValues();
+  for (let i = vals.length - 1; i >= 0; i--) {
+    if (vals[i][0] === stamp && vals[i][1] === name) {
+      if (ls.getMaxRows() > 2) ls.deleteRow(i + 2);
+      else ls.getRange(i + 2, 1, 1, LOG_HEADERS.length).clearContent();
+      return;
+    }
+  }
 }
 
 function addStudents(req) {

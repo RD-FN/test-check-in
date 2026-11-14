@@ -9,7 +9,7 @@
  *                (ตอนเชื่อม Google Sheets ใช้ PIN ที่ตั้งใน Apps Script แทน)
  */
 window.ATTENDANCE_CONFIG = {
-  SHEETS_URL: "",
+  SHEETS_URL: "https://script.google.com/macros/s/AKfycbxQEVctnAoPKOb-1gUzGcq3NcVoL0r1pn-uFF8_4ItE6m2KVI59txgxqgVdYSWv3q2ZAg/exec",
   CLASS_NAME: "Claude AI",
   POLL_SECONDS: 8,
   LOCAL_PIN: "1234"
