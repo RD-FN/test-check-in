@@ -1,0 +1,13 @@
+/* ป้ายเวอร์ชันและหน้าต่าง "มีอะไรใหม่" */
+a.btn{display:inline-flex;align-items:center;text-decoration:none}
+.ver{display:inline-flex;align-items:center;margin-left:10px;padding:1px 11px;border-radius:999px;border:1px solid rgba(255,255,255,.4);background:rgba(255,255,255,.16);color:#F4FFF8;font:600 13px/1.6 "IBM Plex Sans Thai",system-ui,sans-serif;cursor:pointer;vertical-align:middle;touch-action:manipulation;transition:background .2s,color .2s}
+@media (hover:hover){.ver:hover{background:var(--lime);color:#11372A}}
+.vertext{color:var(--ink-soft);text-decoration:underline;text-underline-offset:3px}
+.log{margin:14px 0 4px;max-height:52vh;overflow:auto}
+.log section{padding:12px 0;border-top:1px solid var(--line)}
+.log section:first-child{border-top:0}
+.log h3{margin:0 0 4px;font-family:"Anuphan",sans-serif;font-size:18px;color:var(--leaf-deep)}
+.log h3 span{font-family:"IBM Plex Sans Thai",sans-serif;font-size:13px;font-weight:500;color:var(--ink-soft);margin-left:8px}
+.log section:first-child h3::after{content:"ล่าสุด";margin-left:8px;padding:1px 8px;border-radius:999px;background:var(--mint);color:var(--leaf-deep);font-size:12px;font-weight:600;vertical-align:middle}
+.log ul{margin:0;padding-left:20px}
+.log li{margin:2px 0}
