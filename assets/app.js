@@ -1,168 +1,159 @@
+/* เว็บเช็คชื่อ คลาส Claude AI : ทำงานกับ Supabase (ฐานข้อมูล ล็อกอิน และอัปเดตแบบเรียลไทม์) */
 (function(){
   "use strict";
 
-  /* ค่าตั้งต้น ปรับได้ในไฟล์ config.js */
-  const CONFIG = Object.assign({
-    SHEETS_URL: "",
-    LOCAL_PIN: "1234",
-    POLL_SECONDS: 8,
-    CLASS_NAME: "Claude AI"
+  const CFG = Object.assign({
+    SUPABASE_URL: "",
+    SUPABASE_ANON_KEY: "",
+    ADMIN_EMAIL_HINT: "",
+    TIMEZONE: "Asia/Bangkok"
   }, window.ATTENDANCE_CONFIG || {});
+  const TZ = CFG.TIMEZONE;
 
-  // ชื่อคลาสบนหน้าเว็บ
-  document.getElementById("title").innerHTML = '<small>ใบเช็คชื่อผู้เข้าเรียน</small>' +
-    String(CONFIG.CLASS_NAME).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  document.title = "เช็คชื่อ คลาส " + CONFIG.CLASS_NAME;
-
-  const S = {
-    students:new Map(), checkins:new Map(),
-    settings:{start:"09:00", grace:15},
-    date:todayStr(), lastDate:null, filter:"all", q:"",
-    admin:false, pin:"", loaded:false, busy:false, current:null, flash:new Set()
-  };
   const $ = id => document.getElementById(id);
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-  function todayStr(){ return new Date().toLocaleDateString("en-CA"); }
-  function fmtTime(d){ return d.toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit",hour12:false}); }
+  const S = {
+    students:new Map(),          // id -> student
+    checkins:new Map(),          // student_id -> checkin
+    sigs:new Map(),              // checkin_id -> signature (ผู้สอนเท่านั้น)
+    settings:{class_name:"Claude AI", start_time:"09:00", grace_minutes:15},
+    date:todayStr(), filter:"all", q:"",
+    admin:false, email:"", uid:null,
+    loaded:false, current:null, flash:new Set()
+  };
+
+  /* ---------- เวลา (เวลาประเทศไทยเสมอ ไม่ขึ้นกับนาฬิกาเครื่อง) ---------- */
+  function todayStr(){
+    return new Intl.DateTimeFormat("en-CA", {timeZone:TZ, year:"numeric", month:"2-digit", day:"2-digit"}).format(new Date());
+  }
+  function fmtTime(iso){ return new Date(iso).toLocaleTimeString("th-TH", {hour:"2-digit", minute:"2-digit", hour12:false, timeZone:TZ}); }
   function fmtDate(str){
     const [y,m,d] = str.split("-").map(Number);
-    return new Date(y,m-1,d).toLocaleDateString("th-TH",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+    return new Date(Date.UTC(y, m-1, d, 12)).toLocaleDateString("th-TH", {weekday:"long", day:"numeric", month:"long", year:"numeric", timeZone:TZ});
   }
-  function isLate(iso){
-    if(!S.settings.start) return false;
-    const t = new Date(iso); const [h,m] = S.settings.start.split(":").map(Number);
-    const limit = new Date(t); limit.setHours(h, m + Number(S.settings.grace||0), 0, 0);
-    return t > limit;
+  const hhmm = t => String(t || "").slice(0, 5);
+  function clockParts(){
+    const p = {};
+    new Intl.DateTimeFormat("en-GB", {timeZone:TZ, hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false})
+      .formatToParts(new Date()).forEach(x => p[x.type] = x.value);
+    return p;
   }
-  function minsLate(iso){
-    if(!S.settings.start) return 0;
-    const t = new Date(iso); const [h,m] = S.settings.start.split(":").map(Number);
-    const st = new Date(t); st.setHours(h,m,0,0);
-    return Math.max(0, Math.round((t-st)/60000));
-  }
-  function cleanId(s){ return String(s || "").trim().replace(/[^A-Za-z0-9_\-.~:@+]/g, "").slice(0, 60); }
-  function newId(){ return "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-
-  /* ---------- ที่เก็บข้อมูลในเครื่อง (เมื่อไม่ได้ตั้ง SHEETS_URL) ---------- */
-  const LKEY = "claude-ai-attendance-v1";
-  const blank = () => ({students:[], checkins:{}, settings:{start:"09:00", grace:15}});
-  function lload(){ try{ return JSON.parse(localStorage.getItem(LKEY)) || blank(); }catch(e){ return blank(); } }
-  function lsave(st){ try{ localStorage.setItem(LKEY, JSON.stringify(st)); }catch(e){ throw new Error("พื้นที่เก็บข้อมูลในเบราว์เซอร์เต็ม"); } }
-  function needPin(d){ if(String(d.pin) !== String(CONFIG.LOCAL_PIN)) throw new Error("PIN ไม่ถูกต้อง"); }
-  function mergeStudents(list, people){
-    const names = new Set(list.map(s => s.name.trim())), ids = new Set(list.map(s => s.id));
-    let order = list.reduce((m,s) => Math.max(m, s.order||0), 0) + 1, added = 0, skipped = 0;
-    for(const p of people){
-      if(names.has(p.name)){ skipped++; continue; }
-      let id = cleanId(p.code) || newId(); if(ids.has(id)) id = newId();
-      list.push({id, code:p.code||"", name:p.name, order:order++});
-      names.add(p.name); ids.add(id); added++;
-    }
-    return {added, skipped};
-  }
-  function local(action, d){
-    const st = lload();
-    switch(action){
-      case "load": return {students:st.students, checkins:Object.values(st.checkins[d.date]||{}), settings:st.settings};
-      case "auth": needPin(d); return {};
-      case "checkin": {
-        const day = st.checkins[d.date] = st.checkins[d.date] || {};
-        if(day[d.record.studentId]) return {existed:true};
-        day[d.record.studentId] = d.record; lsave(st); return {};
-      }
-      case "undo": needPin(d); if(st.checkins[d.date]) delete st.checkins[d.date][d.studentId]; lsave(st); return {};
-      case "addStudents": { needPin(d); const r = mergeStudents(st.students, d.people); lsave(st); return r; }
-      case "clearStudents": needPin(d); st.students = []; lsave(st); return {};
-      case "saveSettings": needPin(d); st.settings = {start:d.start, grace:d.grace}; lsave(st); return {};
-    }
-    throw new Error("ไม่รู้จักคำสั่ง " + action);
-  }
-
-  /* ---------- เรียกข้อมูล: Google Sheets หรือในเครื่อง ---------- */
-  async function api(action, d){
-    const body = Object.assign({action, pin:S.pin}, d || {});
-    if(!CONFIG.SHEETS_URL) return Object.assign({ok:true}, local(action, body));
-    let res;
-    try{
-      res = await fetch(CONFIG.SHEETS_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(body)});
-    }catch(e){ throw new Error("เชื่อมต่อ Google Sheets ไม่ได้ ตรวจอินเทอร์เน็ตและ SHEETS_URL"); }
-    if(!res.ok) throw new Error("Google Sheets ตอบกลับผิดพลาด (" + res.status + ")");
-    const j = await res.json();
-    if(!j.ok) throw new Error(j.error || "เกิดข้อผิดพลาด");
-    return j;
-  }
-
-  /* ---------- นาฬิกา ---------- */
   function tick(){
-    const n = new Date();
-    const hh = String(n.getHours()).padStart(2,"0"), mm = String(n.getMinutes()).padStart(2,"0"), ss = String(n.getSeconds()).padStart(2,"0");
-    $("clock").innerHTML = hh + ":" + mm + '<span class="sec">' + ss + "</span>";
-    const mt = document.querySelector("#mClock"); if(mt) mt.textContent = hh + ":" + mm + ":" + ss;
+    const p = clockParts();
+    $("clock").innerHTML = p.hour + ":" + p.minute + '<span class="sec">' + p.second + "</span>";
+    const mt = document.querySelector("#mClock"); if(mt) mt.textContent = p.hour + ":" + p.minute + ":" + p.second;
   }
   tick(); setInterval(tick, 1000);
 
-  /* ---------- โหลดและอัปเดตข้อมูล ---------- */
-  async function refresh(){
-    if(S.busy) return; S.busy = true;
-    const date = S.date;
-    try{
-      const have = [...S.checkins.entries()].filter(([, c]) => c.sig).map(([id]) => id);
-      const r = await api("load", {date, have});
-      if(date !== S.date) return;
-      S.students = new Map((r.students||[]).map(s => [String(s.id), Object.assign({}, s, {id:String(s.id)})]));
-      const same = S.loaded && S.lastDate === date;
-      const m = new Map();
-      (r.checkins||[]).forEach(c => {
-        const id = String(c.studentId), old = S.checkins.get(id);
-        if(!c.sig && old && old.sig) c = Object.assign({}, c, {sig:old.sig});
-        m.set(id, c);
-        if(same && !old) S.flash.add(id);
-      });
-      S.checkins = m;
-      if(r.settings){
-        S.settings = {start:String(r.settings.start||""), grace:Number(r.settings.grace)||0};
-        if(document.activeElement !== $("startTime") && document.activeElement !== $("grace")){
-          $("startTime").value = S.settings.start; $("grace").value = S.settings.grace;
-        }
-      }
-      S.loaded = true; S.lastDate = date;
-      setSync((CONFIG.SHEETS_URL ? "เชื่อมต่อ Google Sheets แล้ว" : "เก็บข้อมูลในเครื่องนี้") + " อัปเดตเมื่อ " + new Date().toLocaleTimeString("th-TH",{hour12:false}));
-      render();
-    }catch(e){
-      setSync("โหลดข้อมูลไม่ได้: " + e.message, true);
-      if(!S.loaded) $("list").innerHTML = '<div class="empty"><h3>โหลดรายชื่อไม่ได้</h3><p>' + esc(e.message) + '</p></div>';
-    }finally{ S.busy = false; }
-  }
   function setSync(t, err){ const el = $("sync"); el.textContent = t; el.classList.toggle("err", !!err); }
+  function listMsg(h, p){ $("list").innerHTML = '<div class="empty"><h3>' + esc(h) + '</h3><p>' + esc(p) + '</p></div>'; }
+  const errText = e => (e && (e.message || e.error_description || e.msg)) || "เกิดข้อผิดพลาด";
+
+  if(!window.supabase || !CFG.SUPABASE_URL || !CFG.SUPABASE_ANON_KEY){
+    setSync("ยังไม่ได้ตั้งค่า Supabase ใน config.js", true);
+    listMsg("ยังเชื่อมต่อฐานข้อมูลไม่ได้", "ตรวจค่า SUPABASE_URL และ SUPABASE_ANON_KEY ใน config.js หรือการเชื่อมต่ออินเทอร์เน็ต");
+    return;
+  }
+  const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, {
+    auth:{persistSession:true, autoRefreshToken:true, detectSessionInUrl:true, flowType:"pkce"}
+  });
+
+  /* ---------- โหลดข้อมูล ---------- */
+  let loading = null, again = false;
+  async function load(){
+    if(loading){ again = true; return loading; }
+    loading = (async () => {
+      do {
+        again = false;
+        const date = S.date;
+        const [st, se, ci] = await Promise.all([
+          sb.from("students").select("id,code,name,sort_order").order("sort_order").order("name").limit(5000),
+          sb.from("settings").select("class_name,start_time,grace_minutes").eq("id", 1).maybeSingle(),
+          sb.from("checkins").select("id,student_id,student_name,student_code,class_date,checked_at,status,late_minutes").eq("class_date", date).limit(5000)
+        ]);
+        for(const r of [st, se, ci]) if(r.error) throw r.error;
+        if(date !== S.date){ again = true; continue; }
+        S.students = new Map(st.data.map(s => [s.id, s]));
+        if(se.data) S.settings = se.data;
+        const m = new Map();
+        ci.data.forEach(c => { if(c.student_id) m.set(c.student_id, c); });
+        S.checkins = m;
+        if(S.admin) await loadSigs(); else S.sigs = new Map();
+        S.loaded = true;
+        applySettingsInputs();
+        render();
+      } while(again);
+    })();
+    try{ await loading; setSync("เชื่อมต่อฐานข้อมูลแล้ว อัปเดตอัตโนมัติ"); }
+    catch(e){
+      setSync("โหลดข้อมูลไม่ได้: " + errText(e), true);
+      if(!S.loaded) listMsg("โหลดรายชื่อไม่ได้", errText(e));
+    }
+    finally{ loading = null; }
+  }
+  async function loadSigs(){
+    const ids = [...S.checkins.values()].map(c => c.id).filter(id => !S.sigs.has(id));
+    for(let i = 0; i < ids.length; i += 100){
+      const {data, error} = await sb.from("checkin_signatures").select("checkin_id,signature").in("checkin_id", ids.slice(i, i+100));
+      if(error) throw error;
+      data.forEach(r => S.sigs.set(r.checkin_id, r.signature));
+    }
+  }
+  let reloadT = null;
+  function scheduleLoad(){ clearTimeout(reloadT); reloadT = setTimeout(load, 200); }
+
+  function subscribe(){
+    sb.channel("attendance")
+      .on("postgres_changes", {event:"*", schema:"public", table:"checkins"}, p => {
+        if(p.eventType === "INSERT" && p.new && p.new.class_date === S.date && p.new.student_id) S.flash.add(p.new.student_id);
+        scheduleLoad();
+      })
+      .on("postgres_changes", {event:"*", schema:"public", table:"students"}, scheduleLoad)
+      .on("postgres_changes", {event:"*", schema:"public", table:"settings"}, scheduleLoad)
+      .subscribe(status => {
+        if(status === "CHANNEL_ERROR" || status === "TIMED_OUT") setSync("การอัปเดตอัตโนมัติขัดข้อง กำลังลองใหม่", true);
+        if(status === "SUBSCRIBED" && S.loaded) setSync("เชื่อมต่อฐานข้อมูลแล้ว อัปเดตอัตโนมัติ");
+      });
+    // สำรองไว้ เผื่อการเชื่อมต่อแบบเรียลไทม์หลุด
+    setInterval(() => { if(!document.hidden) load(); }, 60000);
+    document.addEventListener("visibilitychange", () => { if(!document.hidden) load(); });
+  }
 
   /* ---------- แสดงผล ---------- */
-  function sortedStudents(){
-    return [...S.students.values()].sort((a,b) => (Number(a.order)||0) - (Number(b.order)||0) || String(a.name).localeCompare(String(b.name),"th"));
+  function sortedStudents(){ return [...S.students.values()]; }
+  function applySettingsInputs(){
+    const cn = S.settings.class_name || "Claude AI";
+    $("className").textContent = cn;
+    document.title = "เช็คชื่อ คลาส " + cn;
+    const busy = [$("startTime"), $("grace"), $("classNameInput")].includes(document.activeElement);
+    if(!busy){
+      $("startTime").value = hhmm(S.settings.start_time);
+      $("grace").value = S.settings.grace_minutes;
+      $("classNameInput").value = cn;
+    }
   }
   function render(){
     const isToday = S.date === todayStr();
     $("dateText").textContent = fmtDate(S.date) + (isToday ? "" : " (ย้อนหลัง)");
-    $("startNote").textContent = S.settings.start ? "เริ่มคลาส " + S.settings.start + " น." : "";
+    $("startNote").textContent = S.settings.start_time ? "เริ่มคลาส " + hhmm(S.settings.start_time) + " น." : "";
 
-    const all = sortedStudents().filter(s => s.name);
+    const all = sortedStudents();
     const present = all.filter(s => S.checkins.has(s.id));
-    const late = present.filter(s => isLate(S.checkins.get(s.id).time));
+    const late = present.filter(s => S.checkins.get(s.id).status === "late");
     $("tallyText").innerHTML =
       '<span><b>' + present.length + '</b>มาแล้ว จาก ' + all.length + ' คน</span>' +
       (late.length ? '<span><b>' + late.length + '</b>มาสาย</span>' : '') +
       '<span><b>' + (all.length - present.length) + '</b>ยังไม่มา</span>';
     $("seeds").innerHTML = all.map(s => {
       const c = S.checkins.get(s.id);
-      return '<span class="seed' + (c ? (isLate(c.time) ? " on late" : " on") : "") + '"></span>';
+      return '<span class="seed' + (c ? (c.status === "late" ? " on late" : " on") : "") + '"></span>';
     }).join("");
 
     if(!S.loaded) return;
     if(all.length === 0){
-      $("list").innerHTML = S.admin
-        ? '<div class="empty"><h3>ยังไม่มีรายชื่อผู้เรียน</h3><p>นำเข้าไฟล์ CSV หรือ Excel ใน “เครื่องมือผู้สอน” ด้านล่าง</p></div>'
-        : '<div class="empty"><h3>ยังไม่มีรายชื่อผู้เรียน</h3><p>ผู้สอนกด “โหมดผู้สอน” ท้ายหน้าเพื่อนำเข้ารายชื่อ</p></div>';
-      if(S.admin) $("tools").open = true;
+      if(S.admin){ listMsg("ยังไม่มีรายชื่อผู้เรียน", "นำเข้าไฟล์ CSV หรือ Excel ใน “เครื่องมือผู้สอน” ด้านล่าง"); $("tools").open = true; }
+      else listMsg("ยังไม่มีรายชื่อผู้เรียน", "ผู้สอนจะเพิ่มรายชื่อก่อนเริ่มคลาส");
       return;
     }
     const q = S.q.trim().toLowerCase();
@@ -171,23 +162,22 @@
       const c = S.checkins.has(s.id);
       if(S.filter === "in" && !c) return false;
       if(S.filter === "out" && c) return false;
-      if(q && !(String(s.name).toLowerCase().includes(q) || String(s.code||"").toLowerCase().includes(q))) return false;
+      if(q && !(String(s.name).toLowerCase().includes(q) || String(s.code || "").toLowerCase().includes(q))) return false;
       return true;
     });
-    if(rows.length === 0){
-      $("list").innerHTML = '<div class="empty"><h3>ไม่พบรายชื่อ</h3><p>ลองพิมพ์ชื่อสั้นลง หรือเปลี่ยนตัวกรอง</p></div>';
-      return;
-    }
+    if(rows.length === 0){ listMsg("ไม่พบรายชื่อ", "ลองพิมพ์ชื่อสั้นลง หรือเปลี่ยนตัวกรอง"); return; }
     $("list").innerHTML = rows.map(s => {
       const c = S.checkins.get(s.id);
       let sub = s.code ? '<span>' + esc(s.code) + '</span>' : '';
       let action, sig = '<span class="sig-empty"></span>';
       if(c){
-        const t = new Date(c.time), lt = isLate(c.time);
-        sub += lt
-          ? '<span class="chip late">มา ' + fmtTime(t) + ' น. สาย ' + minsLate(c.time) + ' นาที</span>'
-          : '<span class="chip ok">มา ' + fmtTime(t) + ' น.</span>';
-        if(c.sig) sig = '<img class="sig-thumb" alt="ลายเซ็นของ ' + esc(s.name) + '" src="' + esc(c.sig) + '" data-view="' + esc(s.id) + '">';
+        sub += c.status === "late"
+          ? '<span class="chip late">มา ' + fmtTime(c.checked_at) + ' น. สาย ' + c.late_minutes + ' นาที</span>'
+          : '<span class="chip ok">มา ' + fmtTime(c.checked_at) + ' น.</span>';
+        const img = S.admin && S.sigs.get(c.id);
+        sig = img
+          ? '<img class="sig-thumb" alt="ลายเซ็นของ ' + esc(s.name) + '" src="' + esc(img) + '" data-view="' + esc(s.id) + '">'
+          : '<span class="chip signed">✍ เซ็นแล้ว</span>';
         action = '<button class="btn btn-done" data-view="' + esc(s.id) + '">เช็คแล้ว ✓</button>';
       } else {
         action = '<button class="btn btn-go" data-sign="' + esc(s.id) + '"' + (isToday ? "" : " disabled") + '>เช็คชื่อ</button>';
@@ -201,45 +191,50 @@
     $("note").textContent = isToday ? "" : "กำลังดูข้อมูลย้อนหลัง เช็คชื่อได้เฉพาะวันนี้";
   }
 
-  /* ---------- หน้าต่างเซ็นชื่อ ---------- */
+  /* ---------- หน้าต่าง (modal) ---------- */
+  function openModal(html, key){
+    S.current = key;
+    $("modal").innerHTML = html;
+    $("scrim").classList.add("open");
+  }
+  function closeModal(){ $("scrim").classList.remove("open"); $("modal").innerHTML = ""; S.current = null; }
+  $("scrim").addEventListener("click", e => { if(S.current && e.target === $("scrim")) closeModal(); });
+  document.addEventListener("keydown", e => { if(e.key === "Escape" && S.current) closeModal(); });
+
   function openSign(id){
     const s = S.students.get(id); if(!s) return;
-    S.current = id;
-    $("modal").innerHTML =
+    openModal(
       '<div class="m-head"><div><p class="sub" style="margin:0">ยืนยันการเข้าเรียน</p><h2 class="m-name" id="mName">' + esc(s.name) + '</h2></div>' +
       '<div class="m-time"><b id="mClock"></b><span>เวลาที่จะบันทึก</span></div></div>' +
       '<div class="padwrap"><canvas id="pad" aria-label="ช่องเซ็นชื่อ"></canvas><div class="padline"></div><div class="padhint" id="padHint">เซ็นชื่อด้วยนิ้วหรือเมาส์</div></div>' +
       '<div class="status err" id="mErr"></div>' +
       '<div class="m-actions"><button class="btn btn-ghost" id="clearPad">ล้างลายเซ็น</button>' +
-      '<div class="right"><button class="btn btn-ghost" id="mCancel">ยกเลิก</button><button class="btn btn-go" id="mOk">ยืนยันเข้าเรียน</button></div></div>';
-    $("scrim").classList.add("open");
+      '<div class="right"><button class="btn btn-ghost" id="mCancel">ยกเลิก</button><button class="btn btn-go" id="mOk">ยืนยันเข้าเรียน</button></div></div>', id);
     tick(); setupPad();
     $("mCancel").onclick = closeModal;
-    $("mOk").onclick = confirmSign;
+    $("mOk").onclick = () => confirmSign(id);
   }
   function openView(id){
     const s = S.students.get(id), c = S.checkins.get(id); if(!s || !c) return;
-    S.current = id;
-    const t = new Date(c.time);
-    $("modal").innerHTML =
+    const img = S.admin && S.sigs.get(c.id);
+    openModal(
       '<div class="m-head"><div><p class="sub" style="margin:0">เช็คชื่อแล้ว</p><h2 class="m-name" id="mName">' + esc(s.name) + '</h2></div>' +
-      '<div class="m-time"><b>' + fmtTime(t) + '</b><span>' + (isLate(c.time) ? "สาย " + minsLate(c.time) + " นาที" : "ตรงเวลา") + '</span></div></div>' +
-      (c.sig ? '<img class="bigsig" alt="ลายเซ็น" src="' + esc(c.sig) + '">' : '') +
+      '<div class="m-time"><b>' + fmtTime(c.checked_at) + '</b><span>' + (c.status === "late" ? "สาย " + c.late_minutes + " นาที" : "ตรงเวลา") + '</span></div></div>' +
+      (img ? '<img class="bigsig" alt="ลายเซ็น" src="' + esc(img) + '">' : '<p class="note">' + (S.admin ? "ไม่มีลายเซ็นในระบบ" : "ลายเซ็นดูได้เฉพาะผู้สอน") + '</p>') +
       '<div class="status err" id="mErr"></div>' +
       '<div class="m-actions">' + (S.admin ? '<button class="btn btn-danger" id="mUndo">ยกเลิกการเช็คชื่อ</button>' : '<span></span>') +
-      '<div class="right"><button class="btn btn-go" id="mCancel">ปิด</button></div></div>';
-    $("scrim").classList.add("open");
+      '<div class="right"><button class="btn btn-go" id="mCancel">ปิด</button></div></div>', id);
     $("mCancel").onclick = closeModal;
     if($("mUndo")) $("mUndo").onclick = async () => {
+      if(!confirm("ยกเลิกการเช็คชื่อของ " + s.name + "?")) return;
       $("mUndo").disabled = true;
-      try{ await api("undo", {date:S.date, studentId:id}); S.checkins.delete(id); closeModal(); render(); refresh(); }
-      catch(e){ $("mUndo").disabled = false; $("mErr").textContent = e.message; }
+      const {error} = await sb.from("checkins").delete().eq("id", c.id);
+      if(error){ $("mUndo").disabled = false; $("mErr").textContent = errText(error); return; }
+      S.checkins.delete(id); closeModal(); render(); load();
     };
   }
-  function closeModal(){ $("scrim").classList.remove("open"); $("modal").innerHTML = ""; S.current = null; }
-  $("scrim").addEventListener("click", e => { if(e.target === $("scrim")) closeModal(); });
-  document.addEventListener("keydown", e => { if(e.key === "Escape" && S.current) closeModal(); });
 
+  /* ---------- ช่องเซ็นชื่อ ---------- */
   let pad = null;
   function setupPad(){
     const cv = $("pad"), ctx = cv.getContext("2d");
@@ -281,32 +276,31 @@
     resizeT = setTimeout(() => { if(pad && $("pad") === pad.cv) sizePad(); }, 120);
   });
   function exportSig(){
-    // ขนาดเล็กพอจะเก็บในเซลล์ Google Sheets ได้ (จำกัด 50,000 ตัวอักษร)
-    const w = 360, h = Math.round(w * pad.cv.height / pad.cv.width);
+    const w = 420, h = Math.round(w * pad.cv.height / pad.cv.width);
     const out = document.createElement("canvas"); out.width = w; out.height = h;
     out.getContext("2d").drawImage(pad.cv, 0, 0, w, h);
     return out.toDataURL("image/png");
   }
-  async function confirmSign(){
+  async function confirmSign(id){
     if(!pad || !pad.ink){ $("mErr").textContent = "กรุณาเซ็นชื่อก่อนกดยืนยัน"; return; }
-    const id = S.current, s = S.students.get(id);
     const btn = $("mOk"); btn.disabled = true; btn.textContent = "กำลังบันทึก";
-    const now = new Date(), iso = now.toISOString(), lt = isLate(iso);
-    const record = {
-      studentId:id, name:s.name, code:s.code || "", time:iso, timeText:fmtTime(now),
-      status: lt ? "สาย" : "มาเรียน", lateMinutes: lt ? minsLate(iso) : 0, sig: exportSig()
-    };
-    try{
-      await api("checkin", {date:S.date, record});
-      S.checkins.set(id, record); S.flash.add(id);
-      closeModal(); render(); refresh();
-    }catch(e){
+    const sig = exportSig();
+    const {data, error} = await sb.rpc("check_in", {p_student_id:id, p_signature:sig});
+    if(error){
       btn.disabled = false; btn.textContent = "ยืนยันเข้าเรียน";
-      $("mErr").textContent = "บันทึกไม่สำเร็จ: " + e.message;
+      $("mErr").textContent = "บันทึกไม่สำเร็จ: " + errText(error);
+      return;
     }
+    const row = Array.isArray(data) ? data[0] : data;
+    if(row && row.student_id){
+      S.checkins.set(row.student_id, row);
+      if(S.admin) S.sigs.set(row.id, sig);
+      S.flash.add(row.student_id);
+    }
+    closeModal(); render(); load();
   }
 
-  /* ---------- การใช้งานรายชื่อ ---------- */
+  /* ---------- รายชื่อ ค้นหา ตัวกรอง ---------- */
   $("list").addEventListener("click", e => {
     const sign = e.target.closest("[data-sign]"); if(sign && !sign.disabled) return openSign(sign.dataset.sign);
     const view = e.target.closest("[data-view]"); if(view) return openView(view.dataset.view);
@@ -317,33 +311,96 @@
     document.querySelectorAll(".seg button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
     render();
   }));
-  function setDate(d){ S.date = d; S.checkins = new Map(); render(); refresh(); }
+  function setDate(d){ S.date = d; S.checkins = new Map(); render(); load(); }
   $("dateInput").addEventListener("change", e => { if(e.target.value) setDate(e.target.value); });
+  setInterval(() => { if(!S.admin && S.date !== todayStr()) setDate(todayStr()); }, 60000);
 
-  /* ---------- โหมดผู้สอน ---------- */
+  /* ---------- ล็อกอินผู้สอน (Google หรือ ลิงก์ทางอีเมล) ---------- */
+  const redirectTo = location.origin + location.pathname;
+  function openLogin(msg, isErr){
+    openModal(
+      '<div class="login">' +
+      '<div class="login-mark" aria-hidden="true">🌿</div>' +
+      '<h2 class="m-name" id="mName">เข้าสู่ระบบผู้สอน</h2>' +
+      '<p class="login-sub">สำหรับผู้สอนที่ได้รับสิทธิ์เท่านั้น ผู้เรียนเช็คชื่อได้โดยไม่ต้องเข้าสู่ระบบ</p>' +
+      '<button class="btn gbtn" id="gLogin" type="button">' +
+        '<svg width="20" height="20" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.6-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.6-.4-3.5z"/></svg>' +
+        '<span>เข้าสู่ระบบด้วย Google</span></button>' +
+      '<div class="divider"><span>หรือรับลิงก์ทางอีเมล</span></div>' +
+      '<div class="inline"><input type="email" id="loginEmail" autocomplete="email" placeholder="อีเมลผู้สอน" value="' + esc(CFG.ADMIN_EMAIL_HINT) + '">' +
+      '<button class="btn btn-ghost" id="mailLogin" type="button">ส่งลิงก์</button></div>' +
+      '<div class="status' + (isErr ? " err" : "") + '" id="loginStatus">' + esc(msg || "") + '</div>' +
+      '<div class="m-actions"><span></span><div class="right"><button class="btn btn-ghost" id="mCancel">ปิด</button></div></div>' +
+      '</div>', "__login");
+    $("mCancel").onclick = closeModal;
+    $("gLogin").onclick = async () => {
+      $("gLogin").disabled = true;
+      const {error} = await sb.auth.signInWithOAuth({
+        provider:"google",
+        options:{redirectTo, queryParams:{prompt:"select_account", login_hint:CFG.ADMIN_EMAIL_HINT || undefined}}
+      });
+      if(error){ $("gLogin").disabled = false; loginStatus(errText(error), true); }
+    };
+    $("mailLogin").onclick = async () => {
+      const email = $("loginEmail").value.trim();
+      if(!/^\S+@\S+\.\S+$/.test(email)){ loginStatus("กรอกอีเมลให้ถูกต้อง", true); return; }
+      $("mailLogin").disabled = true;
+      const {error} = await sb.auth.signInWithOtp({email, options:{emailRedirectTo:redirectTo}});
+      $("mailLogin").disabled = false;
+      if(error) loginStatus(errText(error), true);
+      else loginStatus("ส่งลิงก์ไปที่ " + email + " แล้ว เปิดอีเมลแล้วกดลิงก์เพื่อเข้าสู่ระบบ", false);
+    };
+  }
+  function loginStatus(t, err){ const el = $("loginStatus"); if(!el) return; el.textContent = t; el.classList.toggle("err", !!err); }
+
+  async function applySession(session){
+    const uid = session && session.user ? session.user.id : null;
+    if(uid === S.uid) return;
+    S.uid = uid;
+    if(!session){
+      S.admin = false; S.email = ""; S.sigs = new Map();
+      applyAdmin(); return;
+    }
+    const email = session.user.email || "";
+    const {data, error} = await sb.rpc("is_admin");
+    if(error || data !== true){
+      await sb.auth.signOut();
+      S.uid = null; S.admin = false; S.email = "";
+      applyAdmin();
+      openLogin(error ? "ตรวจสิทธิ์ไม่สำเร็จ: " + errText(error) : "บัญชี " + email + " ไม่มีสิทธิ์ผู้สอน ลองเข้าด้วยบัญชีผู้สอน", true);
+      return;
+    }
+    S.admin = true; S.email = email;
+    if(S.current === "__login") closeModal();
+    applyAdmin();
+    load();
+  }
   function applyAdmin(){
-    $("tools").hidden = !S.admin; $("dateWrap").hidden = !S.admin;
-    $("adminBtn").textContent = S.admin ? "ออกจากโหมดผู้สอน" : "โหมดผู้สอน";
+    $("tools").hidden = !S.admin;
+    $("dateWrap").hidden = !S.admin;
+    $("who").hidden = !S.admin;
+    $("who").textContent = S.admin ? "ผู้สอน: " + S.email : "";
+    $("adminBtn").textContent = S.admin ? "ออกจากระบบ" : "เข้าสู่ระบบผู้สอน";
     $("dateInput").value = S.date;
     if(!S.admin && S.date !== todayStr()) setDate(todayStr()); else render();
   }
   $("adminBtn").addEventListener("click", async () => {
-    if(S.admin){
-      S.admin = false; S.pin = "";
-      try{ sessionStorage.removeItem("att-pin"); }catch(e){}
-      applyAdmin(); return;
-    }
-    const pin = prompt("ใส่ PIN ผู้สอน");
-    if(pin === null) return;
-    S.pin = pin;
-    try{
-      await api("auth");
-      S.admin = true;
-      try{ sessionStorage.setItem("att-pin", pin); }catch(e){}
-      applyAdmin();
-    }catch(e){ S.pin = ""; alert(e.message); }
+    if(S.admin){ await sb.auth.signOut(); return; }
+    openLogin("");
   });
+  sb.auth.onAuthStateChange((event, session) => { setTimeout(() => applySession(session), 0); });
 
+  // แสดงข้อผิดพลาดที่ส่งกลับมาจากหน้าล็อกอิน (เช่น ยังไม่ได้เปิด Google ใน Supabase)
+  (function(){
+    const qs = new URLSearchParams(location.search + "&" + location.hash.replace(/^#/, ""));
+    const msg = qs.get("error_description");
+    if(msg){
+      history.replaceState(null, "", location.pathname);
+      openLogin("เข้าสู่ระบบไม่สำเร็จ: " + msg.replace(/\+/g, " "), true);
+    }
+  })();
+
+  /* ---------- เครื่องมือผู้สอน ---------- */
   function parseRows(rows){
     rows = rows.filter(r => r && r.some(c => String(c ?? "").trim() !== ""));
     if(!rows.length) return [];
@@ -367,12 +424,23 @@
     }).filter(p => p.name && !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFD]/.test(p.name) && p.name.length <= 120);
   }
   async function importPeople(people, st){
-    st.classList.remove("err"); st.textContent = "กำลังเพิ่ม " + people.length + " คน";
-    try{
-      const r = await api("addStudents", {people});
-      st.textContent = "เพิ่มแล้ว " + r.added + " คน" + (r.skipped ? " (ข้ามชื่อซ้ำ " + r.skipped + " คน)" : "");
-      refresh();
-    }catch(e){ st.classList.add("err"); st.textContent = "เพิ่มไม่สำเร็จ: " + e.message; }
+    st.classList.remove("err");
+    const names = new Set([...S.students.values()].map(s => s.name.trim()));
+    let order = [...S.students.values()].reduce((m, s) => Math.max(m, s.sort_order || 0), 0);
+    const rows = []; let skipped = 0;
+    people.forEach(p => {
+      if(names.has(p.name)){ skipped++; return; }
+      names.add(p.name);
+      rows.push({name:p.name, code:p.code || "", sort_order:++order});
+    });
+    if(!rows.length){ st.textContent = "ไม่มีชื่อใหม่ (ซ้ำกับที่มีอยู่ " + skipped + " คน)"; return; }
+    st.textContent = "กำลังเพิ่ม " + rows.length + " คน";
+    for(let i = 0; i < rows.length; i += 500){
+      const {error} = await sb.from("students").upsert(rows.slice(i, i+500), {onConflict:"name", ignoreDuplicates:true});
+      if(error){ st.classList.add("err"); st.textContent = "เพิ่มไม่สำเร็จ: " + errText(error); return; }
+    }
+    st.textContent = "เพิ่มแล้ว " + rows.length + " คน" + (skipped ? " (ข้ามชื่อซ้ำ " + skipped + " คน)" : "");
+    load();
   }
   async function handleFile(file){
     const st = $("importStatus"); st.classList.remove("err");
@@ -407,53 +475,64 @@
 
   $("saveSettings").addEventListener("click", async () => {
     const st = $("setStatus");
-    const data = {start:$("startTime").value || "", grace:Math.max(0, Number($("grace").value) || 0)};
-    try{ await api("saveSettings", data); S.settings = data; st.classList.remove("err"); st.textContent = "บันทึกเวลาเริ่มคลาสแล้ว"; render(); }
-    catch(e){ st.classList.add("err"); st.textContent = "บันทึกไม่สำเร็จ: " + e.message; }
+    const data = {
+      class_name: $("classNameInput").value.trim() || "Claude AI",
+      start_time: $("startTime").value || "09:00",
+      grace_minutes: Math.min(240, Math.max(0, Number($("grace").value) || 0)),
+      updated_at: new Date().toISOString()
+    };
+    const {error} = await sb.from("settings").update(data).eq("id", 1);
+    if(error){ st.classList.add("err"); st.textContent = "บันทึกไม่สำเร็จ: " + errText(error); return; }
+    S.settings = Object.assign({}, S.settings, data);
+    st.classList.remove("err"); st.textContent = "บันทึกการตั้งค่าแล้ว";
+    $("startTime").blur(); applySettingsInputs(); render();
   });
 
-  $("exportBtn").addEventListener("click", () => {
-    const lines = [["ลำดับ","รหัส","ชื่อ","วันที่","สถานะ","เวลามา","สายกี่นาที","เซ็นชื่อแล้ว"]];
-    sortedStudents().forEach((s, i) => {
-      const c = S.checkins.get(s.id);
-      lines.push([i+1, s.code || "", s.name, S.date,
-        c ? (isLate(c.time) ? "สาย" : "มาเรียน") : "ขาด",
-        c ? fmtTime(new Date(c.time)) : "",
-        c && isLate(c.time) ? minsLate(c.time) : "",
-        c && c.sig ? "ใช่" : ""]);
-    });
-    const csv = "\uFEFF" + lines.map(r => r.map(v => '"' + String(v).replace(/"/g,'""') + '"').join(",")).join("\r\n");
+  function downloadCsv(name, lines){
+    const csv = "\uFEFF" + lines.map(r => r.map(v => '"' + String(v ?? "").replace(/"/g, '""') + '"').join(",")).join("\r\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv;charset=utf-8"}));
-    a.download = "attendance-claude-ai-" + S.date + ".csv";
+    a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-    $("exportStatus").textContent = "ดาวน์โหลดแล้ว";
+  }
+  const statusTh = c => c ? (c.status === "late" ? "สาย" : "มาเรียน") : "ขาด";
+  $("exportBtn").addEventListener("click", () => {
+    const lines = [["ลำดับ","รหัส","ชื่อ","วันที่","สถานะ","เวลามา","สายกี่นาที"]];
+    sortedStudents().forEach((s, i) => {
+      const c = S.checkins.get(s.id);
+      lines.push([i+1, s.code || "", s.name, S.date, statusTh(c), c ? fmtTime(c.checked_at) : "", c && c.status === "late" ? c.late_minutes : ""]);
+    });
+    downloadCsv("attendance-" + S.date + ".csv", lines);
+    $("exportStatus").classList.remove("err"); $("exportStatus").textContent = "ดาวน์โหลดแล้ว";
   });
-
+  $("exportAllBtn").addEventListener("click", async () => {
+    const st = $("exportStatus"); st.classList.remove("err"); st.textContent = "กำลังรวบรวมประวัติ";
+    const all = [];
+    for(let from = 0; ; from += 1000){
+      const {data, error} = await sb.from("checkins")
+        .select("class_date,checked_at,student_code,student_name,status,late_minutes")
+        .order("class_date").order("checked_at").range(from, from + 999);
+      if(error){ st.classList.add("err"); st.textContent = "ดาวน์โหลดไม่สำเร็จ: " + errText(error); return; }
+      all.push(...data);
+      if(data.length < 1000) break;
+    }
+    const lines = [["วันที่","เวลามา","รหัส","ชื่อ","สถานะ","สายกี่นาที"]];
+    all.forEach(c => lines.push([c.class_date, fmtTime(c.checked_at), c.student_code, c.student_name, statusTh(c), c.status === "late" ? c.late_minutes : ""]));
+    downloadCsv("attendance-history.csv", lines);
+    st.textContent = "ดาวน์โหลดประวัติ " + all.length + " รายการแล้ว";
+  });
   $("clearBtn").addEventListener("click", async () => {
     const st = $("exportStatus");
     if(!S.students.size) return;
     if(!confirm("ลบรายชื่อผู้เรียนทั้งหมด " + S.students.size + " คน? ประวัติการเช็คชื่อยังเก็บไว้")) return;
-    try{ await api("clearStudents"); st.classList.remove("err"); st.textContent = "ลบรายชื่อแล้ว"; refresh(); }
-    catch(e){ st.classList.add("err"); st.textContent = "ลบไม่สำเร็จ: " + e.message; }
+    const {error} = await sb.from("students").delete().not("id", "is", null);
+    if(error){ st.classList.add("err"); st.textContent = "ลบไม่สำเร็จ: " + errText(error); return; }
+    st.classList.remove("err"); st.textContent = "ลบรายชื่อแล้ว"; load();
   });
 
   /* ---------- เริ่มทำงาน ---------- */
-  async function start(){
-    render();
-    await refresh();
-    try{
-      const saved = sessionStorage.getItem("att-pin");
-      if(saved){ S.pin = saved; await api("auth"); S.admin = true; applyAdmin(); }
-    }catch(e){ S.pin = ""; }
-    if(CONFIG.SHEETS_URL){
-      setInterval(() => { if(!document.hidden) refresh(); }, Math.max(3, CONFIG.POLL_SECONDS) * 1000);
-      document.addEventListener("visibilitychange", () => { if(!document.hidden) refresh(); });
-    } else {
-      window.addEventListener("storage", e => { if(e.key === LKEY) refresh(); });
-    }
-    setInterval(() => { if(!S.admin && S.date !== todayStr()) setDate(todayStr()); }, 60000);
-  }
-  start();
+  render();
+  load();
+  subscribe();
 })();

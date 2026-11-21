@@ -1,0 +1,17 @@
+/* หน้าล็อกอินผู้สอนและส่วนที่เพิ่มในเวอร์ชัน 2 */
+[hidden]{display:none !important}
+.login{text-align:center}
+.login-mark{width:56px;height:56px;margin:4px auto 10px;border-radius:18px;display:grid;place-items:center;font-size:28px;background:var(--mint)}
+.login-sub{margin:6px auto 18px;max-width:380px;color:var(--ink-soft);font-size:15px}
+.gbtn{width:100%;display:flex;align-items:center;justify-content:center;gap:12px;background:var(--paper);color:var(--ink);border:1.5px solid var(--line);font-size:16px;min-height:50px}
+@media (hover:hover){.gbtn:hover{border-color:var(--leaf);background:var(--mint-2)}}
+.divider{display:flex;align-items:center;gap:12px;margin:18px 0 12px;color:var(--ink-soft);font-size:14px}
+.divider::before,.divider::after{content:"";flex:1;border-top:1px solid var(--line)}
+.login .inline input{flex:1;min-width:0;padding:11px 14px;border-radius:12px;border:1.5px solid var(--line);background:var(--paper);font-size:16px}
+.login .inline input:focus{border-color:var(--leaf);outline:none;box-shadow:0 0 0 4px var(--mint)}
+.login .status{text-align:left}
+.chip.signed{background:var(--mint-2);color:var(--ink-soft);border:1px solid var(--line);font-weight:500}
+.foot-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.who{font-size:13px;color:var(--leaf-deep);background:var(--mint);padding:4px 12px;border-radius:999px}
+.tool input[type=text]#classNameInput{margin-bottom:8px}
+@media (max-width:620px){.foot-actions{width:100%;justify-content:space-between}}

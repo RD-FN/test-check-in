@@ -8,8 +8,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anuphan:wght@500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<link rel="stylesheet" href="assets/style.css?v=1.5.0">
-<link rel="stylesheet" href="assets/version.css?v=1.5.0">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
+<link rel="stylesheet" href="assets/style.css?v=2.0.0">
+<link rel="stylesheet" href="assets/version.css?v=2.0.0">
+<link rel="stylesheet" href="assets/admin.css?v=2.0.0">
 
 </head>
 <body>
@@ -18,7 +20,7 @@
   <header class="hero">
     <div class="hero-top">
       <div>
-        <h1 class="course" id="title"><small>ใบเช็คชื่อผู้เข้าเรียน</small>Claude AI</h1>
+        <h1 class="course" id="title"><small>ใบเช็คชื่อผู้เข้าเรียน</small><span id="className">Claude AI</span></h1>
         <p class="date" id="dateText"></p>
       </div>
       <div>
@@ -49,7 +51,7 @@
     <div class="empty"><h3>กำลังโหลดรายชื่อ</h3><p>รอสักครู่</p></div>
   </main>
   <p class="note" id="note"></p>
-  <div class="foot"><span><span id="sync">กำลังเชื่อมต่อ</span><br><a id="verText" class="vertext" href="#"></a></span><button class="btn btn-ghost" id="adminBtn">โหมดผู้สอน</button></div>
+  <div class="foot"><span><span id="sync">กำลังเชื่อมต่อ</span><br><a id="verText" class="vertext" href="#"></a></span><span class="foot-actions"><span id="who" class="who" hidden></span><button class="btn btn-ghost" id="adminBtn">เข้าสู่ระบบผู้สอน</button></span></div>
 
   <details class="tools" id="tools" hidden>
     <summary>เครื่องมือผู้สอน</summary>
@@ -70,8 +72,9 @@
         <div class="status" id="addStatus"></div>
       </div>
       <div class="tool">
-        <h4>เวลาเริ่มคลาส</h4>
-        <p>ใช้แยกสถานะ “ตรงเวลา” กับ “สาย”</p>
+        <h4>ตั้งค่าคลาส</h4>
+        <p>ชื่อคลาส เวลาเริ่ม และนาทีที่ผ่อนผันก่อนนับว่า “สาย”</p>
+        <input type="text" id="classNameInput" placeholder="ชื่อคลาส" aria-label="ชื่อคลาส">
         <div class="inline">
           <input type="time" id="startTime" aria-label="เวลาเริ่ม">
           <input type="number" id="grace" min="0" max="120" aria-label="ผ่อนผัน (นาที)" title="ผ่อนผัน (นาที)" style="max-width:90px">
@@ -82,9 +85,12 @@
       </div>
       <div class="tool">
         <h4>ส่งออกผลเช็คชื่อ</h4>
-        <p>ไฟล์ CSV ของวันที่เลือก เปิดใน Excel หรือนำเข้า Google Sheets ได้ทันที</p>
+        <p>ไฟล์ CSV เปิดใน Excel หรือนำเข้า Google Sheets ได้ทันที</p>
         <div class="inline">
-          <button class="btn btn-go" id="exportBtn">ดาวน์โหลด CSV</button>
+          <button class="btn btn-go" id="exportBtn">CSV วันที่เลือก</button>
+          <button class="btn btn-ghost" id="exportAllBtn">ประวัติทั้งหมด</button>
+        </div>
+        <div class="inline" style="margin-top:8px">
           <button class="btn btn-danger" id="clearBtn">ลบรายชื่อทั้งหมด</button>
         </div>
         <div class="status" id="exportStatus"></div>
@@ -98,9 +104,9 @@
   <div class="modal" id="modal"></div>
 </div>
 
-<script src="config.js?v=1.5.0"></script>
-<script src="version.js?v=1.5.0"></script>
-<script src="assets/app.js?v=1.5.0"></script>
-<script src="assets/version-ui.js?v=1.5.0"></script>
+<script src="config.js?v=2.0.0"></script>
+<script src="version.js?v=2.0.0"></script>
+<script src="assets/app.js?v=2.0.0"></script>
+<script src="assets/version-ui.js?v=2.0.0"></script>
 </body>
 </html>
